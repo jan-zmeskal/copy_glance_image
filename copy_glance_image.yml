@@ -1,0 +1,82 @@
+- hosts: localhost
+  gather_facts: false
+
+  vars:
+    # Sensitive variables
+    source_glance_auth_url: "http://my-openstack.com:5000/v3"
+    source_glance_username: "admin"
+    source_glance_password: "password"
+    source_glance_project_name: "admin"
+    source_glance_user_domain_name: "Default"
+    source_glance_project_domain_name: "Default"
+    engine_url: "https://my-engine.com/ovirt-engine/api"
+    engine_username: "admin@internal"
+    engine_password: "password"
+
+    # Variables related to process of image copy
+    glance_image_to_copy: ""  # Name of the Glance image we want to copy from source to destination Glance domain
+    source_glance_domain: ""  # Name of the source Glance domain as it is registered in oVirt
+    transfer_storage_domain: ""  # This oVirt storage domain will be used for storing intermediate oVirt disk
+    transfer_cluster: "" # This oVirt cluster will be used for storing intermediate oVirt disk
+    destination_glance_domain: ""  # Name of the destination Glance domain as it is registered in oVirt
+
+    # Defaults you probably don't need to edit
+    intermediary_template_name: "temporary_template_from_glance"
+    timeout_for_intermediary_template_creation: 600
+    timeout_for_intermediary_template_deletion: 300
+
+  tasks:
+    - name: Delete existing Glance image in destination domain if present
+      os_image:
+        auth:
+          auth_url: "{{ source_glance_auth_url }}"
+          username: "{{ source_glance_username }}"
+          password: "{{ source_glance_password }}"
+          project_name: "{{ source_glance_project_name }}"
+          user_domain_name: "{{ source_glance_user_domain_name }}"
+          project_domain_name: "{{ source_glance_project_domain_name }}"
+        name: "{{ glance_image_to_copy }}"
+        state: absent
+
+    - name: Authenticate with oVirt
+      ovirt_auth:
+        url: "{{ engine_url }}"
+        username: "{{ engine_username }}"
+        password: "{{ engine_password }}"
+        insecure: yes
+
+    - block:
+      - name: Create oVirt template out of Glance image
+        ovirt_template:
+          auth: "{{ ovirt_auth }}"
+          state: imported
+          name: "{{ intermediary_template_name }}"
+          image_disk: "{{ glance_image_to_copy }}"
+          image_provider: "{{ source_glance_domain }}"
+          storage_domain: "{{ transfer_storage_domain }}"
+          cluster: "{{ transfer_cluster }}"
+          timeout: "{{ timeout_for_intermediary_template_creation }}"
+
+      - name: Get ID of disk imported to oVirt
+        ovirt_disk_facts:
+          auth: "{{ ovirt_auth }}"
+          pattern: "name={{ glance_image_to_copy}}"
+
+      - name: Print the ID of imported disk
+        debug:
+          msg: "ID of disk imported from source Glance is {{ ovirt_disks[0].id }}"
+
+      - name: Export oVirt disk as an image to destionation Glance domain
+        ovirt_disk:
+          auth: "{{ ovirt_auth }}"
+          id: "{{ ovirt_disks[0].id }}"
+          state: exported
+          image_provider: "{{ destination_glance_domain }}"
+
+      always:
+        - name: Clean-up the transitory oVirt template
+          ovirt_template:
+            auth: "{{ ovirt_auth }}"
+            state: absent
+            name: "{{ intermediary_template_name }}"
+            timeout: "{{ timeout_for_intermediary_template_deletion }}"
